@@ -13,7 +13,7 @@ A comprehensive demo showcasing the features of the `layout-manager-react` packa
 
 ## Live Demo
 
-Visit the [live demo on GitHub Pages](https://hrashkan/layout-manager-demo/)
+Visit the [live demo on GitHub Pages](https://hrashkan.github.io/layout-manager-demo/)
 
 > **Note:** Replace `your-username` with your GitHub username and `layout-manager-demo` with your repository name if different.
 
