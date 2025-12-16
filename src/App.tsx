@@ -15,8 +15,6 @@ import {
   updateNodeById,
   findNodeById,
   removeEmptyTabsets,
-  createLayoutStorage,
-  isLocalStorageAvailable,
   removeTab,
   restoreTab,
   type LayoutModel,
@@ -27,6 +25,7 @@ import {
   type ComponentRestoreData,
   type LayoutNode,
 } from "layout-manager-react";
+import { storage, isStorageAvailable } from "./utils/storage";
 
 // Sample components for the demo
 const SampleComponent: React.FC<{
@@ -139,18 +138,24 @@ const COMPONENT_CONFIG: Record<
 const App: React.FC = () => {
   const layoutRef = useRef<LayoutRef>(null);
   const [storageEnabled, setStorageEnabled] = useState(() => {
-    const saved = localStorage.getItem("demo-storage-enabled");
+    const saved = storage.getItem("demo-storage-enabled");
     return saved ? JSON.parse(saved) : true;
   });
   const [storageKey] = useState("demo-layout");
 
   // Try to load direction from storage first, fallback to "ltr"
   const getInitialDirection = (): "ltr" | "rtl" => {
-    if (storageEnabled && isLocalStorageAvailable()) {
-      const storage = createLayoutStorage({ key: storageKey });
-      const savedModel = storage.load();
-      if (savedModel?.global?.direction) {
-        return savedModel.global.direction;
+    if (storageEnabled && isStorageAvailable()) {
+      const savedData = storage.getItem(storageKey);
+      if (savedData) {
+        try {
+          const savedModel = JSON.parse(savedData) as LayoutModel;
+          if (savedModel?.global?.direction) {
+            return savedModel.global.direction;
+          }
+        } catch (error) {
+          console.warn("Failed to parse saved layout:", error);
+        }
       }
     }
     return "ltr";
@@ -160,54 +165,91 @@ const App: React.FC = () => {
     getInitialDirection
   );
 
-  const initialModel = createLayoutModel(
-    createRow("root", [
-      createColumn("left-panel", [
-        createTabSet("left-main", [
-          createTab("tab-dashboard", "dashboard", "Dashboard"),
-          createTab("tab-analytics", "analytics", "Analytics"),
-          createTab("tab-reports", "reports", "Reports"),
-        ]),
-        createTabSet("left-secondary", [
-          createTab("tab-notifications", "notifications", "Notifications"),
-          createTab("tab-messages", "messages", "Messages"),
-        ]),
-      ]),
-      createColumn("center-panel", [
-        createRow("top-center", [
-          createTabSet("center-main", [
-            createTab("tab-editor", "editor", "Code Editor"),
-            createTab("tab-terminal", "terminal", "Terminal"),
-            createTab("tab-output", "output", "Output"),
+  // Create default initial model
+  const createDefaultModel = useCallback(
+    (dir: "ltr" | "rtl" = direction): LayoutModel => {
+      return createLayoutModel(
+        createRow("root", [
+          createColumn("left-panel", [
+            createTabSet("left-main", [
+              createTab("tab-dashboard", "dashboard", "Dashboard"),
+              createTab("tab-analytics", "analytics", "Analytics"),
+              createTab("tab-reports", "reports", "Reports"),
+            ]),
+            createTabSet("left-secondary", [
+              createTab("tab-notifications", "notifications", "Notifications"),
+              createTab("tab-messages", "messages", "Messages"),
+            ]),
+          ]),
+          createColumn("center-panel", [
+            createRow("top-center", [
+              createTabSet("center-main", [
+                createTab("tab-editor", "editor", "Code Editor"),
+                createTab("tab-terminal", "terminal", "Terminal"),
+                createTab("tab-output", "output", "Output"),
+              ]),
+            ]),
+            createRow("bottom-center", [
+              createTabSet("center-bottom", [
+                createTab("tab-console", "console", "Console"),
+                createTab("tab-logs", "logs", "Logs"),
+              ]),
+            ]),
+          ]),
+          createColumn("right-panel", [
+            createTabSet("right-main", [
+              createTab("tab-settings", "settings", "Settings"),
+              createTab("tab-properties", "properties", "Properties"),
+              createTab("tab-explorer", "explorer", "Explorer"),
+              createTab("tab-search", "search", "Search"),
+            ]),
+            createTabSet("right-secondary", [
+              createTab("tab-git", "git", "Git"),
+              createTab("tab-extensions", "extensions", "Extensions"),
+            ]),
           ]),
         ]),
-        createRow("bottom-center", [
-          createTabSet("center-bottom", [
-            createTab("tab-console", "console", "Console"),
-            createTab("tab-logs", "logs", "Logs"),
-          ]),
-        ]),
-      ]),
-      createColumn("right-panel", [
-        createTabSet("right-main", [
-          createTab("tab-settings", "settings", "Settings"),
-          createTab("tab-properties", "properties", "Properties"),
-          createTab("tab-explorer", "explorer", "Explorer"),
-          createTab("tab-search", "search", "Search"),
-        ]),
-        createTabSet("right-secondary", [
-          createTab("tab-git", "git", "Git"),
-          createTab("tab-extensions", "extensions", "Extensions"),
-        ]),
-      ]),
-    ]),
-    {
-      splitterSize: 8,
-      direction: direction,
-    }
+        {
+          splitterSize: 8,
+          direction: dir,
+        }
+      );
+    },
+    [direction]
   );
 
-  const [model, setModel] = useState<LayoutModel>(initialModel);
+  // Load model from storage or use default
+  const getInitialModel = useCallback((): LayoutModel => {
+    if (storageEnabled && isStorageAvailable()) {
+      const savedData = storage.getItem(storageKey);
+      if (savedData) {
+        try {
+          const savedModel = JSON.parse(savedData) as LayoutModel;
+          if (savedModel && savedModel.layout) {
+            // Ensure direction is set
+            return {
+              ...savedModel,
+              global: {
+                ...savedModel.global,
+                direction: savedModel.global?.direction || direction,
+              },
+            };
+          }
+        } catch (error) {
+          console.warn("Failed to parse saved layout:", error);
+        }
+      }
+    }
+    return createDefaultModel(direction);
+  }, [storageEnabled, storageKey, direction, createDefaultModel]);
+
+  const [model, setModel] = useState<LayoutModel>(getInitialModel);
+
+  // Memoize default model layout for restoration purposes
+  const defaultModelLayout = useMemo(
+    () => createDefaultModel(direction).layout,
+    [createDefaultModel, direction]
+  );
 
   // Sync direction from model when it's loaded from storage
   useEffect(() => {
@@ -230,6 +272,23 @@ const App: React.FC = () => {
       restoreDataRef.current = new Map(Object.entries(data));
     }
   }, [model.metadata?.restoreData]);
+
+  // Auto-save model to storage when it changes (with debouncing)
+  useEffect(() => {
+    if (!storageEnabled || !isStorageAvailable()) {
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      try {
+        storage.setItem(storageKey, JSON.stringify(model));
+      } catch (error) {
+        console.warn("Failed to save layout to storage:", error);
+      }
+    }, 500); // Debounce for 500ms
+
+    return () => clearTimeout(timeoutId);
+  }, [model, storageEnabled, storageKey]);
 
   // Helper function to find tab ID by component name
   const findTabIdByComponent = useCallback(
@@ -304,15 +363,15 @@ const App: React.FC = () => {
           // Restore the component
           let restoreData = restoreDataRef.current.get(config.component);
 
-          // If no restore data exists, try to create it from initial model
+          // If no restore data exists, try to create it from default model layout
           if (!restoreData) {
             const initialTabId = findTabIdByComponent(
-              initialModel.layout,
+              defaultModelLayout,
               config.component
             );
             if (initialTabId) {
               // Try to remove and immediately restore to get restore data
-              const tempRemoved = removeTab(initialModel.layout, initialTabId);
+              const tempRemoved = removeTab(defaultModelLayout, initialTabId);
               if (tempRemoved.restoreData) {
                 restoreData = tempRemoved.restoreData;
                 restoreDataRef.current.set(config.component, restoreData);
@@ -324,7 +383,7 @@ const App: React.FC = () => {
             const restored = restoreTab(
               prev.layout,
               restoreData,
-              initialModel.layout
+              defaultModelLayout
             );
             if (restored) {
               // Don't delete restore data - keep it for future toggles
@@ -338,7 +397,7 @@ const App: React.FC = () => {
         return prev;
       });
     },
-    [initialModel.layout, findTabIdByComponent, componentExists]
+    [defaultModelLayout, findTabIdByComponent, componentExists]
   );
 
   const factory = useCallback((node: LayoutNode) => {
@@ -522,16 +581,15 @@ const App: React.FC = () => {
   }, [direction, model]);
 
   const clearStorage = useCallback(() => {
-    if (isLocalStorageAvailable()) {
-      const storage = createLayoutStorage({ key: storageKey });
-      storage.clear();
-      setModel(initialModel);
+    if (isStorageAvailable()) {
+      storage.removeItem(storageKey);
+      setModel(createDefaultModel(direction));
     }
-  }, [storageKey, initialModel]);
+  }, [storageKey, createDefaultModel, direction]);
 
   const resetLayout = useCallback(() => {
-    setModel(initialModel);
-  }, [initialModel]);
+    setModel(createDefaultModel(direction));
+  }, [createDefaultModel, direction]);
 
   // Memoize closeIcon to prevent unnecessary re-renders
   const memoizedCloseIcon = useMemo(() => <CustomCloseIcon />, []);
@@ -658,7 +716,7 @@ const App: React.FC = () => {
                 onChange={(e) => {
                   const newValue = e.target.checked;
                   setStorageEnabled(newValue);
-                  localStorage.setItem(
+                  storage.setItem(
                     "demo-storage-enabled",
                     JSON.stringify(newValue)
                   );
@@ -935,12 +993,6 @@ const App: React.FC = () => {
             if (action.type !== "changeDirection") {
               handleAction(action);
             }
-          }}
-          storage={{
-            enabled: storageEnabled,
-            key: storageKey,
-            autoSave: true,
-            debounceMs: 500,
           }}
           closeIcon={memoizedCloseIcon}
           closeButtonClassName="demo-custom-close-button"
